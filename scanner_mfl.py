@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import serial
 import sys
+import time  # NOVA BIBLIOTECA PARA CONTROLAR OS FPS
 
 print("========================================")
 print("     ESCOLHA O MODO DE VISUALIZAÇÃO     ")
@@ -54,7 +55,7 @@ except Exception as e:
 plt.ion()
 
 # ==========================================
-# EXECUTAR MODO 2D ULTRARRÁPIDO
+# EXECUTAR MODO 2D 
 # ==========================================
 if tipo_visao == '1':
     limite_y_2d = 80 if escolha_escala == '1' else (300 if escolha_escala == '3' else 120)
@@ -65,7 +66,7 @@ if tipo_visao == '1':
     ax.set_ylim(-limite_y_2d, limite_y_2d)
     ax.set_xlim(0, MAX_X_CM)
 
-    limiar_plot = 40.0 * FATOR_ESCALA
+    limiar_plot = 25.0 * FATOR_ESCALA
     ax.axhline(limiar_plot, color='orange', linestyle='--', label='Limiar (+)')
     ax.axhline(-limiar_plot, color='orange', linestyle='--', label='Limiar (-)')
 
@@ -80,9 +81,15 @@ if tipo_visao == '1':
 
     CM_POR_PULSO = 0.05
     print("Modo 2D rodando. Pressione Ctrl+C para sair.")
+    
+    ultima_atualizacao = time.time() # Variável para controlar FPS
+    
     try:
         while True:
-            if ser.in_waiting > 0:
+            dados_lidos = False
+            
+            # 1. LÊ TUDO DA PORTA SERIAL DE UMA SÓ VEZ (Esvazia o Buffer)
+            while ser.in_waiting > 0:
                 linha = ser.readline().decode('utf-8', errors='ignore').strip()
                 if linha:
                     partes = linha.split(',')
@@ -101,21 +108,27 @@ if tipo_visao == '1':
                             if len(x_vals) > 200:
                                 x_vals.pop(0)
                                 y_vals.pop(0)
-
-                            line.set_xdata(x_vals)
-                            line.set_ydata(y_vals)
                             
-                            # Expande o eixo X automaticamente se passar do tamanho base
-                            xmax_atual = max(x_vals) if x_vals else MAX_X_CM
-                            ax.set_xlim(0, max(MAX_X_CM, xmax_atual + 5))
-
-                            plt.draw()
-                            plt.pause(0.0001)
+                            dados_lidos = True
 
                             if trinca == 1:
                                 print(f"[ALERTA] Trinca em X={pos_cm:.1f}cm | Desvio: {desvio_real}")
                         except ValueError:
                             continue
+            
+            # 2. SÓ DESENHA NA TELA SE CHEGOU DADO NOVO E SE PASSOU 0.03 SEGUNDOS (~30 FPS)
+            agora = time.time()
+            if dados_lidos and (agora - ultima_atualizacao) > 0.03:
+                line.set_xdata(x_vals)
+                line.set_ydata(y_vals)
+                
+                xmax_atual = max(x_vals) if x_vals else MAX_X_CM
+                ax.set_xlim(0, max(MAX_X_CM, xmax_atual + 5))
+
+                plt.draw()
+                plt.pause(0.001)
+                ultima_atualizacao = agora
+
     except KeyboardInterrupt:
         pass
 
@@ -131,9 +144,15 @@ else:
     CM_POR_PULSO = 0.05
 
     print(f"Modo 3D rodando (Chapa base {MAX_X_CM}x{MAX_Y_CM}cm). Pressione Ctrl+C para sair.")
+    
+    ultima_atualizacao = time.time()
+    
     try:
         while True:
-            if ser.in_waiting > 0:
+            dados_lidos = False
+            
+            # ESVAZIA O BUFFER
+            while ser.in_waiting > 0:
                 linha = ser.readline().decode('utf-8', errors='ignore').strip()
                 if linha:
                     partes = linha.split(',')
@@ -144,7 +163,7 @@ else:
                             trinca = int(partes[2])
 
                             desvio = desvio_real * FATOR_ESCALA
-                            pos_cm = pulsos_crus * CM_POR_PULSO  # Sem trava rígida de clip
+                            pos_cm = pulsos_crus * CM_POR_PULSO  
 
                             if pos_cm <= 0.5 and ultimo_cm > (MAX_X_CM * 0.4):
                                 current_y_cm = min(current_y_cm + 1.0, MAX_Y_CM)
@@ -153,42 +172,48 @@ else:
                             if current_y_cm not in scan_data:
                                 scan_data[current_y_cm] = {}
                             scan_data[current_y_cm][pos_cm] = desvio
-
-                            # Expande dinamicamente o limite do gráfico se passar do tamanho digitado
-                            max_x_observado = max([max(yd.keys()) for yd in scan_data.values()]) if scan_data else MAX_X_CM
-                            limite_x_plot = max(MAX_X_CM, max_x_observado + 5)
-
-                            ax.clear()
-                            ax.set_xlim(0, limite_x_plot)
-                            ax.set_ylim(0, MAX_Y_CM)
-                            ax.set_zlim(-120 * FATOR_ESCALA, 120 * FATOR_ESCALA)
-                            ax.set_xlabel('Comprimento (X em cm)')
-                            ax.set_ylabel('Largura (Y em cm)')
-                            ax.set_zlabel('Desvio (Z)')
-                            ax.set_title(f'Reconstrução 3D - Y={current_y_cm}cm [{modo_nome}]')
-
-                            all_x = sorted(list(set(x for yd in scan_data.values() for x in yd.keys())))
-                            all_y = sorted(list(scan_data.keys()))
                             
-                            if len(all_y) == 1 and len(all_x) > 1:
-                                scan_data[current_y_cm + 1.0] = scan_data[current_y_cm].copy()
-                                all_y = sorted(list(scan_data.keys()))
-
-                            if len(all_x) > 1 and len(all_y) > 1:
-                                Xg, Yg = np.meshgrid(all_x, all_y)
-                                Zg = np.zeros_like(Xg, dtype=float)
-                                for i, yv in enumerate(all_y):
-                                    for j, xv in enumerate(all_x):
-                                        Zg[i, j] = scan_data[yv].get(xv, 0.0)
-                                ax.plot_wireframe(Xg, Yg, Zg, color='darkblue', rstride=1, cstride=1, linewidth=0.6)
-
-                            plt.draw()
-                            plt.pause(0.001)
+                            dados_lidos = True
 
                             if trinca == 1:
                                 print(f"[ALERTA 3D] Trinca em X={pos_cm:.1f}cm, Y={current_y_cm}cm")
                         except ValueError:
                             continue
+            
+            # DESENHA O 3D A 15 FPS (O 3D é mais pesado, 0.06s de intervalo garante que não trave)
+            agora = time.time()
+            if dados_lidos and (agora - ultima_atualizacao) > 0.06:
+                max_x_observado = max([max(yd.keys()) for yd in scan_data.values()]) if scan_data else MAX_X_CM
+                limite_x_plot = max(MAX_X_CM, max_x_observado + 5)
+
+                ax.clear()
+                ax.set_xlim(0, limite_x_plot)
+                ax.set_ylim(0, MAX_Y_CM)
+                ax.set_zlim(-120 * FATOR_ESCALA, 120 * FATOR_ESCALA)
+                ax.set_xlabel('Comprimento (X em cm)')
+                ax.set_ylabel('Largura (Y em cm)')
+                ax.set_zlabel('Desvio (Z)')
+                ax.set_title(f'Reconstrução 3D - Y={current_y_cm}cm [{modo_nome}]')
+
+                all_x = sorted(list(set(x for yd in scan_data.values() for x in yd.keys())))
+                all_y = sorted(list(scan_data.keys()))
+                
+                if len(all_y) == 1 and len(all_x) > 1:
+                    scan_data[current_y_cm + 1.0] = scan_data[current_y_cm].copy()
+                    all_y = sorted(list(scan_data.keys()))
+
+                if len(all_x) > 1 and len(all_y) > 1:
+                    Xg, Yg = np.meshgrid(all_x, all_y)
+                    Zg = np.zeros_like(Xg, dtype=float)
+                    for i, yv in enumerate(all_y):
+                        for j, xv in enumerate(all_x):
+                            Zg[i, j] = scan_data[yv].get(xv, 0.0)
+                    ax.plot_wireframe(Xg, Yg, Zg, color='darkblue', rstride=1, cstride=1, linewidth=0.6)
+
+                plt.draw()
+                plt.pause(0.001)
+                ultima_atualizacao = agora
+
     except KeyboardInterrupt:
         pass
 
